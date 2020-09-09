@@ -214,14 +214,14 @@ class ServerUDP(object):
     """ServerUDP object."""
 
     def __init__(self, host=socket.gethostname(), port=5000, timeout=0,
-                 backlog=50):
+                 size=4096):
         """."""
         self.host = host
         self.port = port
         self.run = False
         self.id = _make_id()
         self.timeout = timeout
-        self.backlog = backlog
+        self.size = size
         self._list_connection = Queue()
         self._num_connections = 0
         self._last_connection = None
@@ -249,12 +249,10 @@ class ServerUDP(object):
                              daemon=True,
                              name='Timeout-Server-Thread').start()
 
-        self.socket.listen(self.backlog)
         while self.run:
-            connection, remote = self.socket.accept()
-            _t = threading.Thread(
-                target=self._handle_connection,
-                kwargs={'connection': connection})
+            data, remote = self.receive()
+            _t = threading.Thread(target=self._handle_connection,
+                                  kwargs={'remote': remote, 'data': data})
             _t.start()
             self._list_connection.put(_t)
 
@@ -306,24 +304,14 @@ class ServerUDP(object):
             _t.join()
             self._list_connection.task_done()
 
-    def send(self, data, connection):
+    def send(self, data, remote):
         """Send data to the connected client."""
-        data = pickle.dumps(json.dumps(data))
-        response = len(data).to_bytes(4096, 'big') + data
-        connection.sendall(response)
+        self.socket.sendto(pickle.dumps(json.dumps(data)), remote)
 
-    def receive(self, connection, size=4096):
+    def receive(self):
         """Receive data from the client."""
-        length = int.from_bytes(connection.recv(4096), 'big')
-        fragments = []
-        count = 0
-        while True:
-            if count >= length:
-                break
-            chunk = connection.recv(size)
-            fragments.append(chunk)
-            count += len(chunk)
-        return json.loads(pickle.loads(b''.join(fragments)))
+        request, remote = self.socket.recvfrom(self.size)
+        return (json.loads(pickle.loads(request)), remote)
 
     def set_function(self, functions):
         """
@@ -341,25 +329,22 @@ class ServerUDP(object):
 
         self._functions = functions
 
-    def _handle_connection(self, connection):
+    def _handle_connection(self, remote, data):
         """Handle the connection with the client."""
         self._num_connections += 1
         try:
-            request = self.receive(connection=connection)
-
             if getattr(self, '_functions', None):
                 response = []
                 for function in self._functions:
                     try:
-                        _req = deepcopy(request)
+                        _req = deepcopy(data)
                         response.append(function(_req))
                     except Exception as err:
                         response.append(str(err))
             else:
                 response = 'ok'
-            self.send(data=response, connection=connection)
+            self.send(data=response, remote=remote)
         finally:
-            connection.close()
             self._last_connection = datetime.now()
             self._num_connections -= 1
 
@@ -370,35 +355,19 @@ class ClientUDP(object):
     def __init__(self):
         """."""
         self.id = _make_id()
-        self.remote = None
-        self.socket = None
-
-    def connect(self, host=socket.gethostname(), port=5000):
-        """Connect to the server."""
-        self.remote = (host, port)
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         except socket.error as exp:
             print("Socket creation failed.", str(exp))
-        self.socket.connect(self.remote)
 
-    def send(self, data):
+    def send(self, data, host=socket.gethostname(), port=5000):
         """Send data to the connected server."""
-        data = pickle.dumps(json.dumps(data))
-        request = len(data).to_bytes(4096, 'big') + data
-        self.socket.sendall(request)
+        remote = (host, port)
+        self.socket.sendto(pickle.dumps(json.dumps(data)), remote)
 
     def receive(self, size=4096):
         """Receive data from server and close the connection."""
         # recebe o length
-        length = int.from_bytes(self.socket.recv(4096), 'big')
-        fragments = []
-        count = 0
-        while True:
-            if count >= length:
-                break
-            chunk = self.socket.recv(size)
-            fragments.append(chunk)
-            count += len(chunk)
+        response, remote = self.socket.recvfrom(size)
         self.socket.close()
-        return json.loads(pickle.loads(b''.join(fragments)))
+        return json.loads(pickle.loads(response))

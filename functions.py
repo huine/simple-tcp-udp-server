@@ -9,3 +9,8 @@ class function:
     def teste1(item):
         item['response-teste1'] = 30
         return item
+
+    @staticmethod
+    def testeUDP(item):
+        print(item)
+        return ' '.join(item)
